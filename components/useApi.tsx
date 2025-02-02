@@ -13,7 +13,8 @@ type ApiHook = {
 };
 
 export const useApi = (): ApiHook => {
-  const [key, setKey] = useMMKVString('apikey', keyStorage);
+  const [storedKey, setStoredKey] = useMMKVString('apikey', keyStorage);
+  const key = process.env.EXPO_PUBLIC_PERPLEXITY_API_KEY || storedKey;
 
   const sendMessage = async (
     messages: Message[],
@@ -21,26 +22,24 @@ export const useApi = (): ApiHook => {
     onUpdate: (content: string, reasoningContent?: string) => void,
   ) => {
     try {
-      const messageHistory = messages.map((msg) => ({
-        role: msg.role === Role.User ? 'user' : 'assistant',
-        content: msg.content,
-        prefix: msg.prefix,
-      }));
+      const messageHistory = messages
+        .filter((msg) => msg.content.trim() !== '')
+        .map((msg) => ({
+          role: msg.role === Role.User ? 'user' : 'assistant',
+          content: msg.content,
+        }));
 
-      // The last message of deepseek-reasoner must be a user message, or an assistant message with prefix mode on
-      messageHistory[messageHistory.length - 1].prefix = true;
-
-      const response = await fetch('https://api.deepseek.com/beta/chat/completions', {
+      const response = await fetch('https://api.perplexity.ai/chat/completions', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${key}`,
         },
         body: JSON.stringify({
-          model: selectedModel === 'deepseek-reasoner' ? 'deepseek-reasoner' : 'deepseek-chat',
+          model: selectedModel,
           messages: messageHistory,
           stream: true,
-          stop: ['```'],
+          max_tokens: 6000,
         }),
       });
 
@@ -53,33 +52,39 @@ export const useApi = (): ApiHook => {
         throw new Error('No reader available');
       }
 
+      let buffer = '';
+
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
 
-        const chunk = new TextDecoder().decode(value);
-        const lines = chunk.split('\n');
+        // Decode the chunk and add it to our buffer
+        buffer += new TextDecoder().decode(value);
+
+        // Split on newlines, keeping any remainder in the buffer
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || ''; // Keep the last partial line in the buffer
 
         for (const line of lines) {
-          if (line.startsWith('data: ')) {
-            const data = line.slice(6);
-            if (data === '[DONE]') continue;
+          if (line.trim() === '') continue;
+          if (!line.startsWith('data: ')) continue;
 
-            try {
-              const parsed = JSON.parse(data);
-              const content = parsed.choices[0]?.delta?.content;
-              const reasoningContent = parsed.choices[0]?.delta?.reasoning_content;
+          const data = line.slice(6);
+          if (data === '[DONE]') continue;
 
-              if (content || reasoningContent) {
-                onUpdate(content || '', reasoningContent);
-              }
-            } catch (e) {
-              console.error('Error parsing chunk:', e);
+          try {
+            const parsed = JSON.parse(data);
+            const content = parsed.choices?.[0]?.delta?.content;
+            if (content) {
+              onUpdate(content, '');
             }
+          } catch (e) {
+            console.error('Error parsing chunk:', e, 'Line:', line);
           }
         }
       }
     } catch (error) {
+      console.error('Error in API call:', error);
       throw error;
     }
   };
